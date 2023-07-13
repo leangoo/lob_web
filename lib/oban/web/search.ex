@@ -9,13 +9,13 @@ defmodule Oban.Web.Search do
   @split_pattern ~r/\s+(?=([^\"]*\"[^\"]*\")*[^\"]*$)/
   @ignored_chars ~W(; / \ ` ' = * ! ? # $ & + ^ | ~ < > ( \) { } [ ])
 
-  @empty {[{:args, []}, {:meta, []}, {:tags, []}, {:worker, []}], []}
+  @empty {[{:args, []}, {:meta, []}, {:worker, []}], []}
 
   defmacrop json_search(column, terms) do
     quote do
       fragment(
         """
-        jsonb_to_tsvector(?, '["all"]') @@ websearch_to_tsquery(?)
+        jsonb_to_tsvector('english', ? - 'recorded', '["all"]') @@ websearch_to_tsquery(?)
         """,
         unquote(column),
         unquote(terms)
@@ -27,7 +27,7 @@ defmodule Oban.Web.Search do
     quote do
       fragment(
         """
-        jsonb_to_tsvector(? #> ?, '["all"]') @@ websearch_to_tsquery(?)
+        jsonb_to_tsvector('english', ? #> ?, '["all"]') @@ websearch_to_tsquery(?)
         """,
         unquote(column),
         unquote(path),
@@ -98,7 +98,7 @@ defmodule Oban.Web.Search do
     |> Enum.map(&prep_terms/1)
   end
 
-  defp parse(["priority:" <> priorities | tail], ctx, acc) do
+  defp parse(["priority:" <> priorities | tail], ctx, acc) when byte_size(priorities) > 0 do
     priorities =
       priorities
       |> String.split(",")
@@ -107,7 +107,7 @@ defmodule Oban.Web.Search do
     parse(tail, @empty, [{:priority, priorities}, ctx | acc])
   end
 
-  defp parse(["id:" <> ids | tail], ctx, acc) do
+  defp parse(["id:" <> ids | tail], ctx, acc) when byte_size(ids) > 0 do
     ids =
       ids
       |> String.split(",")
