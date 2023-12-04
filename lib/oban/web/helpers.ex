@@ -2,21 +2,34 @@ defmodule Oban.Web.Helpers do
   @moduledoc false
 
   alias Oban.Job
-  alias Oban.Web.{AccessError, Resolver, Timing}
+  alias Oban.Web.{AccessError, Query}
+  alias Phoenix.VerifiedRoutes
 
   # Routing Helpers
 
   @doc """
   Construct a path to a dashboard page with optional params.
 
-  Routing is based on a socket and path helper tuple stored in the process
-  dictionary. Proper routing can be disabled for testing by setting the value to
-  `:nowhere`.
+  Routing is based on a socket and prefix tuple stored in the process dictionary. Proper routing
+  can be disabled for testing by setting the value to `:nowhere`.
   """
-  def oban_path(args) when is_list(args) do
+  def oban_path(route, params \\ %{})
+
+  def oban_path(route, params) when is_list(route) do
+    route
+    |> Enum.join("/")
+    |> oban_path(params)
+  end
+
+  def oban_path(route, params) do
+    params =
+      params
+      |> Enum.sort()
+      |> Query.encode_params()
+
     case Process.get(:routing) do
-      {socket, path_helper} ->
-        apply(socket.router.__helpers__(), path_helper, [socket | args])
+      {socket, prefix} ->
+        VerifiedRoutes.unverified_path(socket, socket.router, "#{prefix}/#{route}", params)
 
       :nowhere ->
         "/"
@@ -24,26 +37,6 @@ defmodule Oban.Web.Helpers do
       nil ->
         raise RuntimeError, "nothing stored in the :routing key"
     end
-  end
-
-  def oban_path(page) when is_atom(page) do
-    oban_path([:index, page])
-  end
-
-  def oban_path(page, %{id: id}) when is_atom(page) do
-    oban_path([:show, page, id])
-  end
-
-  def oban_path(page, params) when is_atom(page) and is_map(params) do
-    params =
-      params
-      |> Enum.reject(fn {_, val} -> is_nil(val) end)
-      |> Map.new(fn
-        {key, [_ | _] = val} -> {key, Enum.join(val, ",")}
-        {key, val} -> {key, val}
-      end)
-
-    oban_path([:index, page, params])
   end
 
   @doc """
@@ -67,7 +60,6 @@ defmodule Oban.Web.Helpers do
   @doc """
   Check an action against the current access controls.
   """
-  @spec can?(Resolver.access(), atom() | keyword()) :: boolean()
   def can?(_action, :all), do: true
   def can?(_action, :read_only), do: false
   def can?(action, [_ | _] = opts), do: Keyword.get(opts, action, false)
@@ -75,7 +67,6 @@ defmodule Oban.Web.Helpers do
   @doc """
   Enforce access by raising an error if access isn't allowed.
   """
-  @spec enforce_access!(Resolver.access(), atom() | keyword()) :: :ok
   def enforce_access!(action, opts) do
     unless can?(action, opts), do: raise(AccessError)
 
@@ -110,56 +101,26 @@ defmodule Oban.Web.Helpers do
   end
 
   @doc """
-  Select an absolute timestamp appropriate for the provided state and format it.
-  """
-  @spec absolute_time(String.t(), Job.t()) :: String.t()
-  def absolute_time(state, job) do
-    case state do
-      "available" -> "Available At: #{truncate_sec(job.scheduled_at)}"
-      "cancelled" -> "Cancelled At: #{truncate_sec(job.cancelled_at)}"
-      "completed" -> "Completed At: #{truncate_sec(job.completed_at)}"
-      "discarded" -> "Discarded At: #{truncate_sec(job.discarded_at)}"
-      "executing" -> "Attempted At: #{truncate_sec(job.attempted_at)}"
-      "retryable" -> "Retryable At: #{truncate_sec(job.scheduled_at)}"
-      "scheduled" -> "Scheduled At: #{truncate_sec(job.scheduled_at)}"
-    end
-  end
-
-  defp truncate_sec(datetime), do: NaiveDateTime.truncate(datetime, :second)
-
-  @doc """
-  Select a duration or distance in words based on the provided state.
-  """
-  @spec relative_time(String.t(), Job.t()) :: String.t()
-  def relative_time(state, job) do
-    case state do
-      "cancelled" -> Timing.to_words(job.relative_cancelled_at)
-      "completed" -> Timing.to_words(job.relative_completed_at)
-      "discarded" -> Timing.to_words(job.relative_discarded_at)
-      "executing" -> Timing.to_duration(job.relative_attempted_at)
-      _ -> Timing.to_words(job.relative_scheduled_at)
-    end
-  end
-
-  @doc """
-  Convert a stringified timestamp (i.e. from an error) into a relative time.
-  """
-  def iso8601_to_words(iso8601, now \\ NaiveDateTime.utc_now()) do
-    {:ok, datetime} = NaiveDateTime.from_iso8601(iso8601)
-
-    datetime
-    |> NaiveDateTime.diff(now)
-    |> Timing.to_words()
-  end
-
-  @doc """
   Round numbers to human readable values with a scale suffix.
   """
   def integer_to_estimate(nil), do: "0"
 
   def integer_to_estimate(number) when number < 1000, do: to_string(number)
 
-  def integer_to_estimate(number) when is_integer(number) do
+  def integer_to_estimate(number) when number < 10_000 do
+    power = 3
+    mult = Integer.pow(10, power)
+    base = floor(number / mult)
+    part = round(rem(number, mult) / Integer.pow(10, power - 1))
+
+    case part do
+      0 -> "#{base}k"
+      10 -> "#{base + 1}k"
+      _ -> "#{base}.#{part}k"
+    end
+  end
+
+  def integer_to_estimate(number) do
     {power, suffix} =
       cond do
         number < 1_000_000 -> {3, "k"}
@@ -167,15 +128,10 @@ defmodule Oban.Web.Helpers do
         true -> {9, "b"}
       end
 
-    mult = floor(:math.pow(10, power))
-    base = floor(number / mult)
-    part = round(rem(number, mult) / round(:math.pow(10, power - 1)))
+    mult = Integer.pow(10, power)
+    base = round(number / mult)
 
-    case part do
-      0 -> "#{base}#{suffix}"
-      10 -> "#{base + 1}#{suffix}"
-      _ -> "#{base}.#{part}#{suffix}"
-    end
+    "#{base}#{suffix}"
   end
 
   @doc """
@@ -191,7 +147,7 @@ defmodule Oban.Web.Helpers do
   def formatted_tags(%Job{tags: tags}), do: Enum.join(tags, ", ")
 
   @doc """
-  A normalized globally unique combination of instance and node names.
+  A normalized, globally unique combination of instance and node names.
   """
   def node_name(%{"node" => node, "name" => name}), do: node_name(node, name)
 
@@ -233,4 +189,16 @@ defmodule Oban.Web.Helpers do
   """
   @spec deletable?(Job.t()) :: boolean()
   def deletable?(%Job{state: state}), do: state != "executing"
+
+  @doc """
+  Whether the job was left in an executing state when the node or producer running it shut down.
+
+  # TODO: This isn't accurate enough. We need to use the UUIDs from all nodes.
+  """
+  def orphaned?(%Job{} = job, %MapSet{} = nodes) do
+    case {job.state, job.attempted_by} do
+      {"executing", [node | _]} -> not MapSet.member?(nodes, node)
+      _ -> false
+    end
+  end
 end

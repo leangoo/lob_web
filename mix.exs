@@ -1,15 +1,15 @@
 defmodule Oban.Web.MixProject do
   use Mix.Project
 
-  @version "2.9.7"
+  @version "2.10.1"
 
   def project do
     [
       app: :oban_web,
       version: @version,
-      elixir: "~> 1.12",
-      compilers: Mix.compilers(),
+      elixir: "~> 1.13",
       elixirc_paths: elixirc_paths(Mix.env()),
+      prune_code_paths: false,
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       docs: docs(),
@@ -30,7 +30,9 @@ defmodule Oban.Web.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger],
+      mod: {Oban.Web.Application, []},
+      env: [cache: true]
     ]
   end
 
@@ -46,27 +48,46 @@ defmodule Oban.Web.MixProject do
   defp deps do
     [
       {:jason, "~> 1.2"},
-      {:oban, "~> 2.11"},
-      {:phoenix, "~> 1.6"},
-      {:phoenix_html, "~> 3.1"},
-      {:phoenix_live_view, ">= 0.17.4 and < 0.20.0"},
-      {:phoenix_view, "~> 2.0"},
-      {:esbuild, "~> 0.3", only: [:dev], runtime: false},
-      {:ex_doc, "~> 0.21", only: [:dev], runtime: false},
-      {:lys_publish, "~> 0.1", only: [:dev], runtime: false, path: "../lys_publish"},
+      {:phoenix, "~> 1.7.0"},
+      {:phoenix_html, "~> 3.2"},
+      {:phoenix_pubsub, "~> 2.1"},
+      {:phoenix_live_view, "~> 0.19"},
+      {:postgrex, "~> 0.17"},
+
+      # Oban
+      {:oban, "~> 2.15"},
+      {:oban_met, "~> 0.1.2", repo: :oban},
+      {:oban_pro, "~> 1.0", repo: :oban, only: [:test, :dev]},
+
+      # Dev Server
+      {:bandit, "~> 0.7", only: :dev},
+      {:esbuild, "~> 0.7", only: :dev, runtime: false},
+      {:faker, "~> 0.17", only: :dev},
+      {:phoenix_live_reload, "~> 1.2", only: :dev},
+      {:tailwind, "~> 0.2", only: :dev, runtime: false},
+
+      # Tooling
       {:credo, "~> 1.6", only: [:test, :dev], runtime: false},
-      {:oban_pro, "~> 0.12", only: [:test, :dev], repo: :oban},
-      {:floki, "~> 0.26", only: [:test]},
-      {:stream_data, "~> 0.5", only: [:test]}
+      {:floki, "~> 0.33", only: [:test, :dev]},
+
+      # Docs and Publishing
+      {:ex_doc, "~> 0.28", only: :dev, runtime: false},
+      {:makeup_diff, "~> 0.1", only: :dev, runtime: false},
+      {:lys_publish, "~> 0.1", only: :dev, runtime: false, optional: true, path: "../lys_publish"}
     ]
   end
 
   defp aliases do
     [
+      "assets.build": ["tailwind default", "esbuild default"],
+      "assets.watch": ["tailwind watch"],
+      dev: "run --no-halt dev.exs",
       release: [
+        "assets.build",
         "cmd git tag v#{@version}",
         "cmd git push",
         "cmd git push --tags",
+        "docs",
         "hex.publish package --yes",
         "lys.publish"
       ],
@@ -91,6 +112,7 @@ defmodule Oban.Web.MixProject do
       extras: extras(),
       groups_for_extras: groups_for_extras(),
       homepage_url: "/",
+      logo: "assets/oban-web-logo.svg",
       skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       before_closing_body_tag: fn _ ->
         """
@@ -102,22 +124,18 @@ defmodule Oban.Web.MixProject do
 
   defp extras do
     [
+      "guides/introduction/overview.md",
       "guides/introduction/installation.md",
-      "guides/configuration/mounting.md",
-      "guides/configuration/customizing.md",
-      "guides/advanced/searching.md",
-      "guides/advanced/telemetry.md",
-      "CHANGELOG.md": [filename: "changelog", title: "Changelog"],
-      "guides/introduction/overview.md": [title: "Overview"]
+      "guides/advanced/metrics.md",
+      "guides/advanced/filtering.md",
+      "CHANGELOG.md": [filename: "changelog", title: "Changelog"]
     ]
   end
 
   defp groups_for_extras do
     [
       Introduction: ~r/guides\/introduction\/.?/,
-      Configuration: ~r/guides\/configuration\/.?/,
-      Advanced: ~r/guides\/advanced\/.?/,
-      Deployment: ~r/guides\/deployment\/.?/
+      Advanced: ~r/guides\/advanced\/.?/
     ]
   end
 end
