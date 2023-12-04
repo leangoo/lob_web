@@ -1,60 +1,58 @@
 defmodule Oban.Web.DashboardLive do
   use Oban.Web, :live_view
 
-  alias Oban.Web.Plugins.Stats
-  alias Oban.Web.{LayoutComponent, RefreshComponent}
   alias Oban.Web.{JobsPage, QueuesPage}
 
   @impl Phoenix.LiveView
   def mount(params, session, socket) do
-    %{"oban" => oban, "refresh" => refresh} = session
-    %{"path_helper" => path_helper, "resolver" => resolver} = session
+    %{"oban" => oban, "prefix" => prefix, "resolver" => resolver} = session
     %{"live_path" => live_path, "live_transport" => live_transport} = session
     %{"user" => user, "access" => access, "csp_nonces" => csp_nonces} = session
+    %{"refresh" => refresh} = session
 
-    conf = await_config(oban)
+    conf = await_init([oban], :supervisor)
+    _met = await_init([oban, Oban.Met], :met)
     page = resolve_page(params)
 
-    :ok = Stats.activate(oban)
+    Process.put(:routing, {socket, prefix})
 
-    Process.put(:routing, {socket, path_helper})
+    refresh = restore_state(socket, "refresh", refresh)
+    theme = restore_state(socket, "theme", "system")
 
     socket =
       socket
-      |> assign(conf: conf, params: params, page: page, resolver: resolver)
+      |> assign(conf: conf, params: params, page: page, init_state: init_state(socket))
       |> assign(live_path: live_path, live_transport: live_transport)
-      |> assign(csp_nonces: csp_nonces, access: access, user: user)
-      |> assign(refresh: refresh, timer: nil)
+      |> assign(access: access, csp_nonces: csp_nonces, resolver: resolver, user: user)
+      |> assign(original_refresh: nil, refresh: refresh, timer: nil, theme: theme)
       |> init_schedule_refresh()
       |> page.comp.handle_mount()
 
     {:ok, socket}
   end
 
+  defp init_state(socket) do
+    case get_connect_params(socket) do
+      %{"init_state" => state} -> state
+      _ -> %{}
+    end
+  end
+
+  defp restore_state(socket, key, default) do
+    socket
+    |> init_state()
+    |> Map.get("oban:" <> key, default)
+  end
+
   @impl Phoenix.LiveView
   def render(assigns) do
+    assigns =
+      assigns
+      |> Map.put(:id, "page")
+      |> Map.drop([:csp_nonces, :live_path, :live_transport, :refresh, :timer])
+
     ~H"""
-    <meta name="live-transport" content={@live_transport} />
-    <meta name="live-path" content={@live_path} />
-
-    <main class="p-4 min-h-screen flex flex-col">
-      <%= if live_flash(@flash, :info) do %>
-        <LayoutComponent.notify flash={@flash} />
-      <% end %>
-
-      <header class="flex items-center">
-        <LayoutComponent.logo />
-        <LayoutComponent.tabs socket={@socket} page={@page.name} />
-
-        <.live_component module={RefreshComponent} id="refresh" refresh={@refresh} />
-
-        <LayoutComponent.dark_toggle />
-      </header>
-
-      <%= render_page(@page, assigns) %>
-
-      <LayoutComponent.footer />
-    </main>
+    <.live_component id="page" module={@page.comp} {assigns} />
     """
   end
 
@@ -77,15 +75,6 @@ defmodule Oban.Web.DashboardLive do
     {:noreply, clear_flash(socket)}
   end
 
-  def handle_info({:update_refresh, refresh}, socket) do
-    socket =
-      socket
-      |> assign(refresh: refresh)
-      |> schedule_refresh()
-
-    {:noreply, socket}
-  end
-
   def handle_info(:pause_refresh, socket) do
     socket =
       if socket.assigns.refresh > 0 do
@@ -98,16 +87,47 @@ defmodule Oban.Web.DashboardLive do
   end
 
   def handle_info(:resume_refresh, socket) do
-    socket =
-      if socket.assigns[:original_refresh] do
-        socket
-        |> assign(refresh: socket.assigns.original_refresh)
-        |> schedule_refresh()
-      else
-        socket
-      end
+    if original = socket.assigns.original_refresh do
+      handle_info({:update_refresh, original}, socket)
+    else
+      {:noreply, socket}
+    end
+  end
 
-    {:noreply, socket}
+  def handle_info(:toggle_refresh, socket) do
+    %{original_refresh: original, refresh: refresh} = socket.assigns
+
+    cond do
+      refresh > 0 ->
+        socket =
+          socket
+          |> assign(refresh: -1, original_refresh: refresh)
+          |> push_event("update-refresh", %{refresh: -1})
+
+        {:noreply, socket}
+
+      is_integer(original) ->
+        handle_info({:update_refresh, original}, socket)
+
+      true ->
+        handle_info({:update_refresh, 1}, socket)
+    end
+  end
+
+  def handle_info({:update_refresh, refresh}, socket) do
+    socket =
+      socket
+      |> assign(refresh: refresh, original_refresh: nil)
+      |> schedule_refresh()
+
+    {:noreply, push_event(socket, "update-refresh", %{refresh: refresh})}
+  end
+
+  def handle_info({:update_theme, theme}, socket) do
+    {:noreply,
+     socket
+     |> assign(theme: theme)
+     |> push_event("update-theme", %{theme: theme})}
   end
 
   def handle_info(:refresh, socket) do
@@ -125,24 +145,40 @@ defmodule Oban.Web.DashboardLive do
 
   ## Mount Helpers
 
-  defp await_config(oban_name, timeout \\ 15_000) do
-    Oban.config(oban_name)
-  rescue
-    exception in [RuntimeError] ->
-      handler = fn _event, _timing, %{conf: conf}, pid ->
-        send(pid, {:conf, conf})
-      end
+  defp await_init([oban_name | _] = args, proc, timeout \\ 15_000) do
+    case apply(Oban.Registry, :whereis, args) do
+      nil ->
+        ref = make_ref()
 
-      :telemetry.attach("oban-await-config", [:oban, :supervisor, :init], handler, self())
+        :telemetry.attach(
+          ref,
+          [:oban, proc, :init],
+          &__MODULE__.relay_init/4,
+          {args, self()}
+        )
 
-      receive do
-        {:conf, %{name: ^oban_name} = conf} ->
-          conf
-      after
-        timeout -> reraise(exception, __STACKTRACE__)
-      end
-  after
-    :telemetry.detach("oban-await-config")
+        receive do
+          {^args, %{name: ^oban_name} = conf} ->
+            :telemetry.detach(ref)
+
+            # Sleep briefly to prevent race conditions between init and child process
+            # initialization.
+            Process.sleep(5)
+
+            conf
+        after
+          timeout ->
+            raise RuntimeError, "no config registered for #{inspect(args)} instance"
+        end
+
+      pid when is_pid(pid) ->
+        Oban.config(oban_name)
+    end
+  end
+
+  @doc false
+  def relay_init(_event, _timing, %{conf: conf}, {args, pid}) do
+    send(pid, {args, conf})
   end
 
   ## Render Helpers
@@ -150,15 +186,6 @@ defmodule Oban.Web.DashboardLive do
   defp resolve_page(%{"page" => "jobs"}), do: %{name: :jobs, comp: JobsPage}
   defp resolve_page(%{"page" => "queues"}), do: %{name: :queues, comp: QueuesPage}
   defp resolve_page(_params), do: %{name: :jobs, comp: JobsPage}
-
-  defp render_page(page, assigns) do
-    assigns =
-      assigns
-      |> Map.put(:id, "page")
-      |> Map.drop([:csp_nonces, :live_path, :live_transport, :refresh, :timer])
-
-    live_component(page.comp, assigns)
-  end
 
   ## Refresh Helpers
 

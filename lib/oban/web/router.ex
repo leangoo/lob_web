@@ -1,5 +1,128 @@
 defmodule Oban.Web.Router do
-  @moduledoc false
+  @moduledoc """
+  Provides mount points for the Web dashboard with customization.
+
+  ### Customizing with a Resolver Callback Module
+
+  Implementing a `Oban.Web.Resolver` callback module allows you to customize the dashboard
+  per-user, i.e. setting access controls or the default refresh rate.
+
+  As a simple example, let's define a module that makes the dashboard read only:
+
+  ```elixir
+  defmodule MyApp.Resolver do
+    @behaviour Oban.Web.Resolver
+
+    @impl true
+    def resolve_access(_user), do: :read_only
+  end
+  ```
+
+  Then specify `MyApp.Resolver` as your resolver:
+
+  ```elixir
+  scope "/" do
+    pipe_through :browser
+
+    oban_dashboard "/oban", resolver: MyApp.Resolver
+  end
+  ```
+
+  See the `Oban.Web.Resolver` docs for more details.
+
+  ### Running Multiple Dashboards
+
+  Applications that run multiple Oban instances can mount a dashboard for each instance. Set the
+  mounted dashboard's `:oban_name` to match the corresponding supervision tree's name. For
+  example, given two configured Oban instances, `Oban` and `MyAdmin.Oban`:
+
+  ```elixir
+  config :my_app, Oban,
+    repo: MyApp.Repo,
+    name: Oban,
+    ...
+
+  config :my_admin, Oban,
+    repo: MyAdmin.Repo,
+    name: MyAdmin.Oban,
+    ...
+  ```
+
+  You can then mount both dashboards in your router:
+
+  ```elixir
+  scope "/" do
+    pipe_through :browser
+
+    oban_dashboard "/oban", oban_name: Oban, as: :oban_dashboard
+    oban_dashboard "/admin/oban", oban_name: MyAdmin.Oban, as: :oban_admin_dashboard
+  end
+  ```
+
+  Note that the default name is `Oban`, setting `oban_name: Oban` in the example above was purely
+  for demonstration purposes.
+
+  ### Customizing the Socket Connection
+
+  Applications that use a live socket other than "/live" can override the default socket path in
+  the router. For example, if your live socket is hosted at `/oban_live`:
+
+  ```elixir
+  socket "/oban_live", Phoenix.LiveView.Socket
+
+  scope "/" do
+    pipe_through :browser
+
+    oban_dashboard "/oban", socket_path: "/oban_live"
+  end
+  ```
+
+  If your application is hosted in an environment that doesn't support websockets you can use
+  longpolling as an alternate transport. To start, make sure that your live socket is configured
+  for longpolling:
+
+  ```elixir
+  socket "/live", Phoenix.LiveView.Socket,
+    longpoll: [connect_info: [session: @session_options], log: false]
+  ```
+
+  Then specify "longpoll" as your transport:
+
+  ```elixir
+  scope "/" do
+    pipe_through :browser
+
+    oban_dashboard "/oban", transport: "longpoll"
+  end
+  ```
+
+  ### Content Security Policy
+
+  To secure the dashboard, or comply with an existing CSP within your application, you can specify
+  nonce keys for images, scripts and styles.
+
+  You'll configure the CSP nonce assign key in your router, where the dashboard is mounted. For
+  example, to use a single nonce for all three asset types:
+
+  ```elixir
+  oban_dashboard("/oban", csp_nonce_assign_key: :my_csp_nonce)
+  ```
+
+  That instructs the dashboard to extract a generated nonce from the `assigns` map on the plug
+  connection, at the `:my_csp_nonce` key.
+
+  Instead, you can specify different keys for each asset type:
+
+  ```elixir
+  oban_dashboard("/oban",
+    csp_nonce_assign_key: %{
+      img: :img_csp_nonce,
+      style: :style_csp_nonce,
+      script: :script_csp_nonce
+    }
+  )
+  ```
+  """
 
   alias Oban.Web.Resolver
 
@@ -16,6 +139,23 @@ defmodule Oban.Web.Router do
   Defines an oban dashboard route.
 
   It requires a path where to mount the dashboard at and allows options to customize routing.
+
+  ## Options
+
+  * `:oban_name` — name of the Oban instance the dashboard will use for configuration and
+    notifications, defaults to `Oban`
+
+  * `:resolver` — an `Oban.Web.Resolver` implementation used to customize the dashboard's
+    functionality.
+
+  * `:socket_path` — a phoenix socket path for live communication, defaults to `"/live"`.
+
+  * `:transport` — a phoenix socket transport, either `"websocket"` or `"longpoll"`, defaults to
+    `"websocket"`.
+
+  * `:csp_nonce_assign_key` — CSP (Content Security Policy) keys used to authenticate image,
+    style, and script assets by pulling a generated nonce out of the connection's `assigns` map. May
+    be `nil`, a single atom, or a map of atoms. Defaults to `nil`.
 
   ## Examples
 
@@ -34,11 +174,20 @@ defmodule Oban.Web.Router do
       end
   """
   defmacro oban_dashboard(path, opts \\ []) do
+    opts =
+      if Macro.quoted_literal?(opts) do
+        Macro.prewalk(opts, &expand_alias(&1, __CALLER__))
+      else
+        opts
+      end
+
     quote bind_quoted: binding() do
+      prefix = Phoenix.Router.scoped_path(__MODULE__, path)
+
       scope path, alias: false, as: false do
         import Phoenix.LiveView.Router, only: [live: 4, live_session: 3]
 
-        {session_name, session_opts, route_opts} = Oban.Web.Router.__options__(opts)
+        {session_name, session_opts, route_opts} = Oban.Web.Router.__options__(prefix, opts)
 
         live_session session_name, session_opts do
           live "/", Oban.Web.DashboardLive, :home, route_opts
@@ -49,21 +198,22 @@ defmodule Oban.Web.Router do
     end
   end
 
+  defp expand_alias({:__aliases__, _, _} = alias, env) do
+    Macro.expand(alias, %{env | function: {:oban_dashboard, 2}})
+  end
+
+  defp expand_alias(other, _env), do: other
+
   @doc false
-  def __options__(opts) do
+  def __options__(prefix, opts) do
     opts = Keyword.merge(@default_opts, opts)
 
     Enum.each(opts, &validate_opt!/1)
 
     session_name = Keyword.get(opts, :as, :oban_dashboard)
 
-    path_helper =
-      [session_name, :path]
-      |> Enum.join("_")
-      |> String.to_atom()
-
     session_args = [
-      path_helper,
+      prefix,
       opts[:oban_name],
       opts[:resolver],
       opts[:socket_path],
@@ -72,21 +222,22 @@ defmodule Oban.Web.Router do
     ]
 
     session_opts = [
+      on_mount: Oban.Web.Authentication,
       session: {__MODULE__, :__session__, session_args},
-      root_layout: {Oban.Web.LayoutView, :app}
+      root_layout: {Oban.Web.Layouts, :root}
     ]
 
     {session_name, session_opts, as: session_name}
   end
 
   @doc false
-  def __session__(conn, path_helper, oban, resolver, live_path, live_transport, csp_key) do
+  def __session__(conn, prefix, oban, resolver, live_path, live_transport, csp_key) do
     user = resolve_with_fallback(resolver, :resolve_user, [conn])
 
     csp_keys = expand_csp_nonce_keys(csp_key)
 
     %{
-      "path_helper" => path_helper,
+      "prefix" => prefix,
       "oban" => oban,
       "user" => user,
       "resolver" => resolver,
@@ -128,10 +279,6 @@ defmodule Oban.Web.Router do
       got #{inspect(name)}
       """
     end
-  end
-
-  defp validate_opt!({:default_refresh, _refresh}) do
-    IO.warn("The :default_refresh option is deprecated, use a Resolver callback module instead")
   end
 
   defp validate_opt!({:resolver, resolver}) do

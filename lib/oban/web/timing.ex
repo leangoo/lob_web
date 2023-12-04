@@ -4,6 +4,21 @@ defmodule Oban.Web.Timing do
   @empty_time "-"
 
   @doc """
+  Snap unix time to an even value for a given increment.
+
+      iex> Oban.Web.Timing.snap(1685707957, 1)
+      1685707957
+
+      iex> Oban.Web.Timing.snap(1685707957, 5)
+      1685707960
+
+      iex> Oban.Web.Timing.snap(1685707957, 30)
+      1685707980
+  """
+  def snap(unix, step) when rem(unix, step) == 0, do: unix
+  def snap(unix, step), do: snap(unix + 1, step)
+
+  @doc """
   Format ellapsed seconds into a timer format of "MM:SS" or "HH:MM:SS".
 
       iex> Oban.Web.Timing.to_duration(0)
@@ -216,6 +231,35 @@ defmodule Oban.Web.Timing do
     job.attempted_at
     |> DateTime.diff(finished_at, :millisecond)
     |> to_duration(:millisecond)
+  end
+
+  @doc """
+  Select an absolute timestamp appropriate for the provided state and format it.
+  """
+  @spec absolute_time(String.t(), Job.t()) :: String.t()
+  def absolute_time(state, job) do
+    case state do
+      "available" -> "Available At: #{truncate_sec(job.scheduled_at)}"
+      "cancelled" -> "Cancelled At: #{truncate_sec(job.cancelled_at)}"
+      "completed" -> "Completed At: #{truncate_sec(job.completed_at)}"
+      "discarded" -> "Discarded At: #{truncate_sec(job.discarded_at)}"
+      "executing" -> "Attempted At: #{truncate_sec(job.attempted_at)}"
+      "retryable" -> "Retryable At: #{truncate_sec(job.scheduled_at)}"
+      "scheduled" -> "Scheduled At: #{truncate_sec(job.scheduled_at)}"
+    end
+  end
+
+  defp truncate_sec(datetime), do: NaiveDateTime.truncate(datetime, :second)
+
+  @doc """
+  Convert a stringified timestamp (i.e. from an error) into a relative time.
+  """
+  def iso8601_to_words(iso8601, now \\ NaiveDateTime.utc_now()) do
+    {:ok, datetime} = NaiveDateTime.from_iso8601(iso8601)
+
+    datetime
+    |> NaiveDateTime.diff(now)
+    |> to_words()
   end
 
   defp pad(time, places \\ 2) do
