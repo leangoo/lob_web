@@ -56,7 +56,7 @@ defmodule Oban.Web.MixProject do
 
       # Oban
       {:oban, "~> 2.15"},
-      {:oban_met, github: "leangoo/lob_met.git", tag: "0.1.3"},
+      {:oban_met, github: "leangoo/lob_met", tag: "0.1.3"},
       {:oban_pro, "~> 1.0", repo: :oban, only: [:test, :dev]},
 
       # Dev Server
